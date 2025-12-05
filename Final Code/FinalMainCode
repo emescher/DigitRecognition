@@ -1,0 +1,215 @@
+#Final
+import os
+import numpy as np
+import gradio as gr
+from PIL import Image, ImageOps
+import tensorflow as tf
+
+# -----------------------------
+# Load your trained model
+# -----------------------------
+m2 = tf.keras.models.load_model("handwritten.keras")
+
+# -----------------------------
+# Folder for saved digits
+# -----------------------------
+SAVE_DIR = "digits"   # relative path: ./digits
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# -----------------------------
+# Helper: normalize image to PIL
+# -----------------------------
+def _to_pil(img):
+    if img is None:
+        return None
+
+    # Sketchpad sometimes returns a dict
+    if isinstance(img, dict):
+        for key in ("composite", "image", "background"):
+            if key in img and img[key] is not None:
+                return _to_pil(img[key])
+        return None
+
+    # Already a PIL image
+    if isinstance(img, Image.Image):
+        return img
+
+    # Path string
+    if isinstance(img, str):
+        return Image.open(img)
+
+    # NumPy array
+    if isinstance(img, np.ndarray):
+        arr = img
+        if arr.dtype in (np.float32, np.float64):
+            arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+        elif arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+
+        if arr.ndim == 2:
+            return Image.fromarray(arr, mode="L")
+        if arr.ndim == 3:
+            if arr.shape[2] == 4:
+                return Image.fromarray(arr, mode="RGBA")
+            if arr.shape[2] == 3:
+                return Image.fromarray(arr, mode="RGB")
+
+        return Image.fromarray(arr)
+
+    return None
+
+# -----------------------------
+# Save one drawn digit to file
+# -----------------------------
+def save_img(img):
+    pil = _to_pil(img)
+    if pil is None:
+        return "Draw something first."
+
+    # Flatten transparency
+    if pil.mode in ("RGBA", "LA"):
+        bg = Image.new("RGB", pil.size, "white")
+        alpha = pil.split()[-1]
+        bg.paste(pil, mask=alpha)
+        pil = bg
+    else:
+        pil = pil.convert("RGB")
+
+    # Grayscale
+    img = pil.convert("L")
+    arr = np.array(img)
+
+    # Binarize (dark = digit)
+    arr = np.where(arr < 200, 0, 255).astype(np.uint8)
+
+    # Find bounding box of digit
+    coords = np.column_stack(np.where(arr < 255))
+    if coords.size == 0:
+        return "No digit drawn!"
+
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+
+    # Crop tightly around digit
+    img = Image.fromarray(arr).crop((x_min, y_min, x_max + 1, y_max + 1))
+
+    # Resize longest side to 20 px (MNIST-ish)
+    w, h = img.size
+    if w > h:
+        new_h = int((20 / w) * h)
+        img = img.resize((20, new_h), Image.LANCZOS)
+    else:
+        new_w = int((20 / h) * w)
+        img = img.resize((new_w, 20), Image.LANCZOS)
+
+    # Pad to 28x28, centered
+    w, h = img.size
+    pad_left = (28 - w) // 2
+    pad_top = (28 - h) // 2
+    pad_right = 28 - w - pad_left
+    pad_bottom = 28 - h - pad_top
+
+    img = ImageOps.expand(img, border=(pad_left, pad_top, pad_right, pad_bottom), fill=255)
+
+    img_arr = np.array(img).astype("uint8")
+
+    # Auto-increment filename
+    i = 1
+    while os.path.exists(os.path.join(SAVE_DIR, f"digit{i}.png")):
+        i += 1
+    filename = os.path.join(SAVE_DIR, f"digit{i}.png")
+
+    Image.fromarray(img_arr).save(filename)
+
+    return f"Saved: {filename}"
+
+# -----------------------------
+# Predict all saved digits
+# -----------------------------
+def predict_all():
+    results = []
+    image_number = 1
+    found_any = False
+
+    while True:
+        path = os.path.join(SAVE_DIR, f"digit{image_number}.png")
+        if not os.path.isfile(path):
+            break
+
+        found_any = True
+        try:
+            # Load as grayscale 28x28
+            pil = Image.open(path).convert("L")
+            arr = np.array(pil).astype(np.uint8)  # shape (28,28)
+
+            # Match your original logic:
+            # img = cv2.imread(... )[:,:,0]
+            # img = np.invert(np.array([img]))
+            x = np.invert(np.array([arr]))  # shape (1, 28, 28)
+
+            prediction = m2.predict(x, verbose=0)
+            pred_digit = int(np.argmax(prediction[0]))
+            conf = float(np.max(prediction[0]))
+
+            results.append(f"{os.path.basename(path)} → {pred_digit} (conf {conf:.2f})")
+        except Exception as e:
+            results.append(f"{os.path.basename(path)} → Error: {e}")
+
+        image_number += 1
+
+    if not found_any:
+        return "No digits saved yet."
+
+    return "\n".join(results)
+
+# -----------------------------
+# Clear canvas helper
+# -----------------------------
+def clear_canvas(_):
+    # Return a blank white 400x400 RGB image
+    return 255 * np.ones((400, 400, 3), dtype=np.uint8)
+
+# -----------------------------
+# Clear all saved images
+# -----------------------------
+def clear_saved_digits():
+    count = 0
+    for fname in os.listdir(SAVE_DIR):
+        fpath = os.path.join(SAVE_DIR, fname)
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+            count += 1
+    return f"Deleted {count} saved digit file(s).", ""  # status, empty predictions
+
+# -----------------------------
+# Gradio UI
+# -----------------------------
+with gr.Blocks() as demo:
+    gr.Markdown("## Draw Multiple Digits → Save → Predict All")
+
+    with gr.Row():
+        pad = gr.Sketchpad(
+            image_mode="RGB",
+            width=400,
+            height=400
+        )
+        predictions_box = gr.Textbox(
+            label="Predictions",
+            lines=10,
+            interactive=False
+        )
+
+    status = gr.Textbox(label="Status", interactive=False)
+
+    with gr.Row():
+        clear_btn = gr.Button("Clear Canvas")
+        save_btn = gr.Button("Save Digit")
+        predict_btn = gr.Button("Predict All Saved Digits")
+        clear_files_btn = gr.Button("Clear Saved Digits")
+
+    clear_btn.click(fn=clear_canvas, inputs=pad, outputs=pad)
+    save_btn.click(fn=save_img, inputs=pad, outputs=status)
+    predict_btn.click(fn=predict_all, outputs=predictions_box)
+    clear_files_btn.click(fn=clear_saved_digits, outputs=[status, predictions_box])
+
+demo.launch()
