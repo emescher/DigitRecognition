@@ -58,9 +58,8 @@ The network was trained for multiple epochs with mini-batches, allowing the weig
 
 ## Results / Outputs / Demo
 The program outputs:
-- The predicted digit (0–9)  
-- The confidence score of the prediction  
-- The processed 28×28 pixel digit image (if displayed)  
+- The predicted digits (0–9)  
+- The confidence scores of the predictions
 
 Example:
 <img width="3194" height="1718" alt="Screenshot 2025-12-04 234828" src="https://github.com/user-attachments/assets/175faa75-b713-4722-820a-fb79c3559065" />
